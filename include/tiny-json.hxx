@@ -37,6 +37,63 @@ public:
   }
 
 protected:
+  struct AbstractCharProvider
+  {
+    virtual ~AbstractCharProvider() = default;
+
+    virtual bool eof() noexcept = 0;
+    virtual char peek() noexcept = 0;
+    virtual char get() noexcept = 0;
+    virtual void unget() noexcept = 0;
+    virtual void ignore() noexcept = 0;
+    virtual int pos() noexcept = 0;
+  };
+
+  class StreamCharProvider : public AbstractCharProvider
+  {
+  public:
+    StreamCharProvider(std::istream &stream) : data(stream) {}
+
+    virtual bool eof() noexcept { return data.eof(); };
+    virtual char peek() noexcept { return data.peek(); };
+    virtual char get() noexcept { return data.get(); };
+    virtual void unget() noexcept { data.unget(); };
+    virtual void ignore() noexcept { data.ignore(); };
+    virtual int pos() noexcept
+    {
+      auto currPos = data.tellg();
+      if (currPos == -1) {
+        data.clear();
+        data.seekg(0, data.end);
+        currPos = data.tellg();
+      }
+      return currPos;
+    }
+
+  private:
+    std::istream &data;
+  };
+
+  class StringCharProvider : public AbstractCharProvider
+  {
+  public:
+    StringCharProvider(const char *str, size_t len) : data(str), len(len) {}
+    StringCharProvider(const std::string &str) : data(str.c_str()), len(str.length()) {}
+    StringCharProvider(std::string_view str) : data(str.data()), len(str.length()) {}
+
+    virtual bool eof() noexcept { return index >= len; };
+    virtual char peek() noexcept { return eof() ? -1 : data[index]; };
+    virtual char get() noexcept { return eof() ? -1 : data[index++]; };
+    virtual void unget() noexcept { index--; };
+    virtual void ignore() noexcept { index++; };
+    virtual int pos() noexcept { return eof() ? len : index; }
+
+  private:
+    const char *data;
+    int index{0};
+    int len{0};
+  };
+
   static inline bool isInRange(int val, int min, int max) noexcept { return val >= min && val <= max; }
 
   static inline bool isIn(const std::string &val, const std::vector<std::string_view> &list) noexcept
@@ -50,7 +107,7 @@ protected:
   }
 
   // Skip all whitespaces & comments
-  static bool skipSpaces(std::istream &inStream) noexcept
+  static bool skipSpaces(AbstractCharProvider &inStream) noexcept
   {
     constexpr std::string_view spaces{" \t\n\r"};
     while (!inStream.eof()) {
@@ -88,7 +145,7 @@ protected:
     return !inStream.eof();
   }
 
-  static bool expectAndConsume(std::istream &inStream, char expected) noexcept
+  static bool expectAndConsume(AbstractCharProvider &inStream, char expected) noexcept
   {
     if (!skipSpaces(inStream) || inStream.peek() != expected) {
       return false;
@@ -97,15 +154,9 @@ protected:
     return skipSpaces(inStream);
   }
 
-  static JsonError getError(std::string_view error, std::istream &is, const std::string &currentStr = "") noexcept
+  static JsonError getError(std::string_view error, AbstractCharProvider &is, const std::string &currentStr = "") noexcept
   {
-    auto errorPos = is.tellg();
-    if (errorPos == -1) {
-      is.clear();
-      is.seekg(0, is.end);
-      errorPos = is.tellg();
-    }
-
+    auto errorPos = is.pos();
     errorPos -= currentStr.length();
 
     std::stringstream ss;
@@ -113,6 +164,11 @@ protected:
     return JsonError(ss.str());
   }
 };
+
+using JsonNull = void *;
+using JsonBool = bool;
+using JsonInt = int64_t;
+using JsonFloat = long double;
 
 template <bool b>
 class JsonString_T;
@@ -124,9 +180,9 @@ template <bool b>
 class JsonArray_T;
 
 template <bool b>
-using ValueTypes = std::variant<void *, bool, int64_t, long double, JsonString_T<b>, JsonArray_T<b>, JsonObject_T<b>, JsonError>;
+using ValueTypes = std::variant<JsonNull, JsonBool, JsonInt, JsonFloat, JsonString_T<b>, JsonArray_T<b>, JsonObject_T<b>, JsonError>;
 template <bool b>
-using ReturnableValueTypes = std::variant<bool, int64_t, long double, JsonString_T<b>, JsonArray_T<b>, JsonObject_T<b>>;
+using ReturnableValueTypes = std::variant<JsonBool, JsonInt, JsonFloat, JsonString_T<b>, JsonArray_T<b>, JsonObject_T<b>>;
 
 template <bool b>
 class JsonValue_T : public ValueTypes<b>, public AbstractJsonValue
@@ -135,33 +191,28 @@ private:
   using super = ValueTypes<b>;
 
 public:
-  static JsonValue_T<b> parse(std::istream &inStream, std::string &error) noexcept
+  static JsonValue_T<b> parse(std::istream &stream, std::string &error) noexcept
   {
-    skipSpaces(inStream);
-    auto parseResult = parse(inStream);
-    if (!parseResult.isValid()) {
-      error = parseResult.asError();
-      return JsonValue_T<b>();
-    }
-    return parseResult;
+    StreamCharProvider inStream(stream);
+    return parse(inStream, error);
   }
 
   static JsonValue_T<b> parse(const std::string &str, std::string &error) noexcept
   {
-    std::stringstream inStream(str);
+    StringCharProvider inStream(str);
     return parse(inStream, error);
   }
 
   static JsonValue_T<b> parse(std::string_view str, std::string &error) noexcept
   {
-    std::stringstream inStream(std::string(str.begin(), str.end()));
+    StringCharProvider inStream(str);
     return parse(inStream, error);
   }
 
   JsonValue_T() noexcept : super(NullValue) {}
-  JsonValue_T(bool value) noexcept : super(value) {}
-  JsonValue_T(int64_t value) noexcept : super(value) {}
-  JsonValue_T(long double value) noexcept : super(value) {}
+  JsonValue_T(JsonBool value) noexcept : super(value) {}
+  JsonValue_T(JsonInt value) noexcept : super(value) {}
+  JsonValue_T(JsonFloat value) noexcept : super(value) {}
   JsonValue_T(JsonString_T<b> value) noexcept : super(value) {}
   JsonValue_T(JsonArray_T<b> value) noexcept : super(value) {}
   JsonValue_T(JsonObject_T<b> value) noexcept : super(value) {}
@@ -185,18 +236,23 @@ public:
     }
   }
 
-  inline bool isNull() const noexcept { return std::holds_alternative<void *>(*this); }
-  inline bool isBool() const noexcept { return std::holds_alternative<bool>(*this); }
-  inline bool isInt() const noexcept { return std::holds_alternative<int64_t>(*this); }
-  inline bool isFloat() const noexcept { return std::holds_alternative<long double>(*this); }
+  inline bool isNull() const noexcept { return std::holds_alternative<JsonNull>(*this); }
+  inline bool isBool() const noexcept { return std::holds_alternative<JsonBool>(*this); }
+  inline bool isInt() const noexcept { return std::holds_alternative<JsonInt>(*this); }
+  inline bool isFloat() const noexcept { return std::holds_alternative<JsonFloat>(*this); }
   inline bool isString() const noexcept { return std::holds_alternative<JsonString_T<b>>(*this); }
   inline bool isArray() const noexcept { return std::holds_alternative<JsonArray_T<b>>(*this); }
   inline bool isObject() const noexcept { return std::holds_alternative<JsonObject_T<b>>(*this); }
   inline bool isValid() const noexcept { return !std::holds_alternative<JsonError>(*this); }
 
-  inline bool asBool() const noexcept { return std::get<bool>(*this); }
-  inline int64_t asInt() const noexcept { return std::get<int64_t>(*this); }
-  inline long double asFloat() const noexcept { return std::get<long double>(*this); }
+  template <typename T>
+  inline T as() const noexcept
+  {
+    return std::get<T>(*this);
+  }
+  inline JsonBool asBool() const noexcept { return std::get<JsonBool>(*this); }
+  inline JsonInt asInt() const noexcept { return std::get<JsonInt>(*this); }
+  inline JsonFloat asFloat() const noexcept { return std::get<JsonFloat>(*this); }
   inline JsonString_T<b> &asString() noexcept { return std::get<JsonString_T<b>>(*this); }
   inline const JsonString_T<b> &asString() const noexcept { return std::get<JsonString_T<b>>(*this); }
   inline JsonObject_T<b> &asObject() noexcept { return std::get<JsonObject_T<b>>(*this); }
@@ -205,39 +261,29 @@ public:
   inline const JsonArray_T<b> &asArray() const noexcept { return std::get<JsonArray_T<b>>(*this); }
   inline JsonError &asError() noexcept { return std::get<JsonError>(*this); }
 
-  // bool operator==(const JsonValue_T<b> &other) const noexcept
-  // {
-  //   if (this->index() != other.index()) {
-  //     return false;
-  //   }
-  //   if (isBool()) {
-  //     return asBool() == other.asBool();
-  //   }
-  //   if (isInt()) {
-  //     return asInt() == other.asInt();
-  //   }
-  //   if (isFloat()) {
-  //     return asFloat() == other.asFloat();
-  //   }
-  //   if (isString()) {
-  //     return asString() == other.asString();
-  //   }
-  //   if (isObject()) {
-  //     return asObject() == other.asObject();
-  //   }
-  //   if (isArray()) {
-  //     return asArray() == other.asArray();
-  //   }
-  //   return true;
-  // }
-
 private:
   friend class JsonString_T<b>;
   friend class JsonObject_T<b>;
   friend class JsonArray_T<b>;
   JsonValue_T(JsonError value) : super(value) {}
 
-  static JsonValue_T<b> parse(std::istream &inStream) noexcept
+  static JsonValue_T<b> parse(AbstractCharProvider &inStream, std::string &error) noexcept
+  {
+    skipSpaces(inStream);
+    auto parseResult = parse(inStream);
+    if (!parseResult.isValid()) {
+      error = parseResult.asError();
+      return JsonValue_T<b>();
+    }
+    skipSpaces(inStream);
+    if (!inStream.eof()) {
+      error = getError("Unexpected char in JSON input", inStream);
+      return JsonValue_T<b>();
+    }
+    return parseResult;
+  }
+
+  static JsonValue_T<b> parse(AbstractCharProvider &inStream) noexcept
   {
     if (!skipSpaces(inStream)) {
       return getError("Unexpected end of JSON input", inStream);
@@ -255,7 +301,7 @@ private:
       return parseNumber(inStream);
     } else {
       using namespace std::literals::string_view_literals;
-      const std::vector<std::string_view> list = {"true"sv, "false"sv, "null"sv};
+      static const std::vector<std::string_view> list = {"true"sv, "false"sv, "null"sv};
 
       str += inStream.get();
       while (isIn(str, list)) {
@@ -270,14 +316,14 @@ private:
           return false;
         }
         if (str == "null") {
-          return NullValue;
+          return JsonValue_T<b>();
         }
       }
     }
     return getError("Unexpected token in JSON", inStream, str);
   }
 
-  static bool parseDigits(std::istream &inStream, std::string &str) noexcept
+  static bool parseDigits(AbstractCharProvider &inStream, std::string &str) noexcept
   {
     size_t initialLen{str.length()};
     while (!inStream.eof() && (isInRange(inStream.peek(), '0', '9'))) {
@@ -286,7 +332,7 @@ private:
     return str.length() > initialLen;
   }
 
-  static JsonValue_T<b> parseNumber(std::istream &inStream) noexcept
+  static JsonValue_T<b> parseNumber(AbstractCharProvider &inStream) noexcept
   {
     std::string str{};
     if (inStream.peek() == '-') {
@@ -300,7 +346,7 @@ private:
 
     // integer
     if (inStream.peek() != '.') {
-      return static_cast<int64_t>(std::stoll(str));
+      return static_cast<JsonInt>(std::stoll(str));
     }
 
     // decimal
@@ -319,7 +365,7 @@ private:
     return std::stold(str);
   }
 
-  static constexpr void *NullValue{nullptr};
+  static constexpr JsonNull NullValue{nullptr};
 };
 
 template <bool b>
@@ -365,7 +411,7 @@ public:
     outStream << '"';
   }
 
-  static JsonValue_T<b> parse(std::istream &inStream) noexcept
+  static JsonValue_T<b> parse(AbstractCharProvider &inStream) noexcept
   {
     if (!expectAndConsume(inStream, '"')) {
       return getError("Expecting \" for JSON string", inStream);
@@ -500,7 +546,7 @@ public:
     outStream << '}';
   }
 
-  static JsonValue_T<b> parse(std::istream &inStream) noexcept
+  static JsonValue_T<b> parse(AbstractCharProvider &inStream) noexcept
   {
     if (!expectAndConsume(inStream, '{')) {
       return getError("Expecting { for JSON object", inStream);
@@ -555,7 +601,7 @@ public:
     outStream << ']';
   }
 
-  static JsonValue_T<b> parse(std::istream &inStream) noexcept
+  static JsonValue_T<b> parse(AbstractCharProvider &inStream) noexcept
   {
     if (!expectAndConsume(inStream, '[')) {
       return getError("Expecting [ for JSON array", inStream);
