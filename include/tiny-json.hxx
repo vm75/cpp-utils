@@ -31,7 +31,7 @@ public:
 
   std::string toString() const noexcept
   {
-    std::stringstream ss;
+    std::stringstream ss{};
     serialize(ss);
     return ss.str();
   }
@@ -90,8 +90,8 @@ protected:
 
   private:
     const char *data;
+    const int len;
     int index{0};
-    int len{0};
   };
 
   static inline bool isInRange(int val, int min, int max) noexcept { return val >= min && val <= max; }
@@ -159,7 +159,7 @@ protected:
     auto errorPos = is.pos();
     errorPos -= currentStr.length();
 
-    std::stringstream ss;
+    std::stringstream ss{};
     ss << "Parse error at position " << errorPos << ": " << error;
     return JsonError(ss.str());
   }
@@ -191,6 +191,12 @@ private:
   using super = ValueTypes<b>;
 
 public:
+  static JsonValue_T<b> &NullValue() noexcept
+  {
+    static auto NullValue = JsonValue_T<b>();
+    return NullValue;
+  }
+
   static JsonValue_T<b> parse(std::istream &stream, std::string &error) noexcept
   {
     StreamCharProvider inStream(stream);
@@ -209,7 +215,9 @@ public:
     return parse(inStream, error);
   }
 
-  JsonValue_T() noexcept : super(NullValue) {}
+  // JsonValue_T(const JsonValue_T &other) noexcept : super(other) {}
+  // JsonValue_T(JsonValue_T &&other) noexcept : super(std::move(other)) {}
+  JsonValue_T() noexcept : super(static_cast<void *>(nullptr)) {}
   JsonValue_T(JsonBool value) noexcept : super(value) {}
   JsonValue_T(JsonInt value) noexcept : super(value) {}
   JsonValue_T(JsonFloat value) noexcept : super(value) {}
@@ -261,6 +269,26 @@ public:
   inline const JsonArray_T<b> &asArray() const noexcept { return std::get<JsonArray_T<b>>(*this); }
   inline JsonError &asError() noexcept { return std::get<JsonError>(*this); }
 
+  JsonValue_T<b> &find(const std::string &path) noexcept
+  {
+    if (isObject()) {
+      return asObject().find(path);
+    } else if (isArray()) {
+      return asArray().find(path);
+    }
+    return NullValue();
+  }
+
+  bool erase(const std::string &path) noexcept
+  {
+    if (isObject()) {
+      return asObject().erase(path);
+    } else if (isArray()) {
+      return asArray().erase(path);
+    }
+    return false;
+  }
+
 private:
   friend class JsonString_T<b>;
   friend class JsonObject_T<b>;
@@ -273,12 +301,12 @@ private:
     auto parseResult = parse(inStream);
     if (!parseResult.isValid()) {
       error = parseResult.asError();
-      return JsonValue_T<b>();
+      return NullValue();
     }
     skipSpaces(inStream);
     if (!inStream.eof()) {
       error = getError("Unexpected char in JSON input", inStream);
-      return JsonValue_T<b>();
+      return NullValue();
     }
     return parseResult;
   }
@@ -316,7 +344,7 @@ private:
           return false;
         }
         if (str == "null") {
-          return JsonValue_T<b>();
+          return NullValue();
         }
       }
     }
@@ -364,8 +392,6 @@ private:
     }
     return std::stold(str);
   }
-
-  static constexpr JsonNull NullValue{nullptr};
 };
 
 template <bool b>
@@ -418,12 +444,9 @@ public:
     }
 
     long codepointRemainder = -1;
-    std::string str;
+    std::string str{};
     while (!inStream.eof()) {
       auto nextChar = inStream.get();
-      if (inStream.eof()) {
-        break;
-      }
       if (nextChar == '"') {
         encodeToUtf8(codepointRemainder, str);
         return JsonString_T<b>(str);
@@ -501,8 +524,9 @@ private:
    */
   static void encodeToUtf8(long &ch, std::string &str)
   {
-    if (ch < 0)
+    if (ch < 0) {
       return;
+    }
 
     if (ch < 0x80) {
       str += static_cast<char>(ch);
@@ -527,10 +551,12 @@ private:
 template <bool b>
 class JsonObject_T : public std::map<JsonString_T<b>, JsonValue_T<b>>, public AbstractJsonValue
 {
+  using super = std::map<JsonString_T<b>, JsonValue_T<b>>;
+
 public:
   void serialize(std::ostream &outStream) const noexcept override
   {
-    bool first = true;
+    bool first{true};
     outStream << '{';
     for (const auto &entry : *this) {
       if (!first) {
@@ -551,8 +577,8 @@ public:
     if (!expectAndConsume(inStream, '{')) {
       return getError("Expecting { for JSON object", inStream);
     }
-    JsonObject_T<b> object;
-    bool first = true;
+    JsonObject_T<b> object{};
+    bool first{true};
     while (skipSpaces(inStream) && inStream.peek() != '}') {
       if (!first) {
         if (!expectAndConsume(inStream, ',')) {
@@ -581,15 +607,53 @@ public:
     inStream.ignore(); // Consume '}'
     return object;
   }
+
+  JsonValue_T<b> &find(const std::string &path) noexcept
+  {
+    auto pos = path.find_first_of('.');
+
+    auto key = (pos == path.npos) ? path : path.substr(0, pos);
+    auto entry = super::find(JsonString_T<b>(key));
+    if (entry == super::end()) {
+      return JsonValue_T<b>::NullValue();
+    }
+    auto &val = entry->second;
+    if (pos == path.npos) {
+      return val;
+    }
+
+    auto next = path.substr(pos + 1);
+    return val.find(next);
+  }
+
+  bool erase(const std::string &path) noexcept
+  {
+    auto pos = path.find_first_of('.');
+
+    auto key = (pos == path.npos) ? path : path.substr(0, pos);
+    auto entry = super::find(JsonString_T<b>(key));
+    if (entry == super::end()) {
+      return false;
+    }
+    if (pos == path.npos) {
+      super::erase(entry);
+      return true;
+    }
+
+    auto next = path.substr(pos + 1);
+    return entry->second.erase(next);
+  }
 };
 
 template <bool b>
 class JsonArray_T : public std::vector<JsonValue_T<b>>, public AbstractJsonValue
 {
+  using super = std::vector<JsonValue_T<b>>;
+
 public:
   void serialize(std::ostream &outStream) const noexcept override
   {
-    bool first = true;
+    bool first{true};
     outStream << '[';
     for (auto &entry : *this) {
       if (!first) {
@@ -608,8 +672,8 @@ public:
     }
 
     skipSpaces(inStream);
-    JsonArray_T<b> array;
-    bool first = true;
+    JsonArray_T<b> array{};
+    bool first{true};
     while (skipSpaces(inStream) && inStream.peek() != ']') {
       if (!first) {
         if (!expectAndConsume(inStream, ',')) {
@@ -630,6 +694,57 @@ public:
 
     inStream.ignore(); // Consume ']'
     return array;
+  }
+
+  size_t toInt(const std::string &str) noexcept
+  {
+    int index{0};
+    for (auto ch : str) {
+      if (!isInRange(ch, '0', '9')) {
+        return super::size();
+      }
+      index = index * 10 + (ch - '0');
+    }
+    if (index >= super::size()) {
+      return super::size();
+    }
+
+    return index;
+  }
+
+  JsonValue_T<b> &find(const std::string &path) noexcept
+  {
+    auto pos = path.find_first_of('.');
+
+    auto key = (pos == path.npos) ? path : path.substr(0, pos);
+    auto index = toInt(key);
+    if (index >= super::size()) {
+      return JsonValue_T<b>::NullValue();
+    }
+    auto &val = (*this)[index];
+    if (pos == path.npos) {
+      return val;
+    }
+    auto next = path.substr(pos + 1);
+    return val.find(next);
+  }
+
+  bool erase(const std::string &path) noexcept
+  {
+    auto pos = path.find_first_of('.');
+
+    auto key = (pos == path.npos) ? path : path.substr(0, pos);
+    auto index = toInt(key);
+    if (index >= super::size()) {
+      return false;
+    }
+    auto val = super::begin() + index;
+    if (pos == path.npos) {
+      super::erase(val);
+      return true;
+    }
+    auto next = path.substr(pos + 1);
+    return val->erase(next);
   }
 };
 
